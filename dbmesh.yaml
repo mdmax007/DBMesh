@@ -1,0 +1,715 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║           DBMesh — Full Configuration Reference                 ║
+# ║                      dbmesh.yaml                                ║
+# ╚══════════════════════════════════════════════════════════════════╝
+#
+# All fields shown with their defaults or representative values.
+# Fields marked [required] must be set. All others are optional.
+#
+# Config can be hot-reloaded (no restart) via:
+#   POST /api/v1/config/reload
+# or
+#   kill -HUP <pid>
+#
+# ──────────────────────────────────────────────────────────────────
+
+
+# ── Node identity ──────────────────────────────────────────────────
+#
+# Every DBMesh node must have a unique id within the cluster.
+# data_dir stores the SQLite database, session state, and gossip
+# persistent state.
+#
+node:
+  id: node-01                       # [required] unique across the cluster
+  name: dbmesh-primary              # human-readable display name
+  data_dir: /var/lib/dbmesh         # persistent storage directory
+  mode: cluster                     # standalone | cluster
+                                    #   standalone: single node, no gossip
+                                    #   cluster: multi-node with gossip sync
+
+
+# ── Listeners ──────────────────────────────────────────────────────
+#
+# DBMesh opens one frontend listener per supported protocol.
+# The admin listener serves the REST API and management UI.
+#
+listeners:
+  mysql:
+    enabled: true
+    bind: 0.0.0.0                   # bind address
+    port: 3306                      # MySQL/MariaDB client port
+    max_connections: 100000         # maximum concurrent client sessions
+    backlog: 1024                   # OS TCP accept() backlog
+    io_threads: 4                   # Boost.Asio thread pool size
+                                    # recommended: number of CPU cores
+
+  postgres:
+    enabled: false                  # Phase 2 — PostgreSQL support
+    bind: 0.0.0.0
+    port: 5432
+    max_connections: 100000
+    io_threads: 4
+
+  admin:
+    bind: 127.0.0.1                 # bind to loopback by default for security
+    port: 8080                      # REST API and management UI port
+
+
+# ── TLS ────────────────────────────────────────────────────────────
+#
+# Two independent TLS configurations:
+#   frontend: client application → DBMesh
+#   backend:  DBMesh → database servers
+#
+# mTLS (mutual TLS) requires clients to present a certificate signed
+# by the configured CA. Set mutual: true to enable.
+#
+tls:
+  frontend:
+    enabled: false
+    cert: /etc/dbmesh/tls/server.crt
+    key: /etc/dbmesh/tls/server.key
+    ca: /etc/dbmesh/tls/ca.crt      # CA cert for verifying client certs (mTLS)
+    mutual: false                   # require client certificate (mTLS)
+    min_version: TLSv1.2            # TLSv1.2 | TLSv1.3
+
+  backend:
+    enabled: false
+    cert: /etc/dbmesh/tls/client.crt
+    key: /etc/dbmesh/tls/client.key
+    ca: /etc/dbmesh/tls/ca.crt      # CA cert for verifying server certs
+    verify_server: true             # verify backend server certificate
+
+
+# ── Backends ───────────────────────────────────────────────────────
+#
+# Define every database backend DBMesh can route to.
+# Backends are grouped by the `group` field. Schemas reference
+# a backend_group by name. All backends sharing a group name are
+# eligible for routing within that group.
+#
+# Supported types:
+#   mysql         MySQL 5.4+ / 5.7+ / 8.x
+#   mariadb       MariaDB 10+ / 11+
+#   postgres      PostgreSQL 9+ (Phase 2)
+#   rds-mysql     AWS RDS MySQL (Phase 3)
+#   rds-mariadb   AWS RDS MariaDB (Phase 3)
+#   rds-postgres  AWS RDS PostgreSQL (Phase 3)
+#
+backends:
+
+  # Primary — receives all writes and transactions
+  - id: mysql-prod-primary          # [required] unique backend identifier
+    type: mysql                     # [required] backend type (see above)
+    host: db-primary.internal       # [required] hostname or IP
+    port: 3306                      # [required] port
+    role: primary                   # primary | replica
+    group: prod                     # [required] backend group name
+    user: dbmesh                    # [required] database user
+    password: secret                # plaintext — prefer secrets_file below
+    secrets_file: ""                # path to file containing password (optional)
+    tags:
+      region: us-east-1             # arbitrary key/value tags for filtering
+      az: us-east-1a
+    pool:
+      min: 10                       # minimum pool connections (maintained always)
+      max: 200                      # maximum pool connections
+      idle_timeout_sec: 60          # close idle connections after this duration
+      connect_timeout_ms: 2000      # connection attempt timeout
+      acquire_timeout_ms: 5000      # max wait for a pool connection
+      warm: true                    # pre-connect min connections on startup
+
+  # Replica 1 — receives read traffic
+  - id: mysql-prod-replica-01
+    type: mysql
+    host: db-replica-01.internal
+    port: 3306
+    role: replica
+    group: prod
+    user: dbmesh
+    password: secret
+    weight: 70                      # relative weight for weighted routing policy
+    max_replication_lag_ms: 500     # exclude from read pool if lag exceeds this
+    pool:
+      min: 10
+      max: 200
+      idle_timeout_sec: 60
+      connect_timeout_ms: 2000
+      warm: true
+
+  # Replica 2 — lower weight, less traffic
+  - id: mysql-prod-replica-02
+    type: mysql
+    host: db-replica-02.internal
+    port: 3306
+    role: replica
+    group: prod
+    user: dbmesh
+    password: secret
+    weight: 30
+    max_replication_lag_ms: 500
+    pool:
+      min: 5
+      max: 100
+      idle_timeout_sec: 60
+      connect_timeout_ms: 2000
+      warm: false
+
+  # Analytics — separate group, isolated from prod traffic
+  - id: mysql-analytics-primary
+    type: mysql
+    host: db-analytics.internal
+    port: 3306
+    role: primary
+    group: analytics
+    user: dbmesh
+    password: secret
+    pool:
+      min: 5
+      max: 50
+      idle_timeout_sec: 120
+      warm: false
+
+  # Example MariaDB backend
+  - id: mariadb-tenant-01
+    type: mariadb
+    host: mariadb-01.internal
+    port: 3306
+    role: primary
+    group: tenant-01
+    user: dbmesh
+    password: secret
+    pool:
+      min: 2
+      max: 50
+      idle_timeout_sec: 60
+
+  # Example PostgreSQL backend (Phase 2)
+  - id: postgres-reporting
+    type: postgres
+    host: pg-reporting.internal
+    port: 5432
+    role: primary
+    group: reporting
+    user: dbmesh
+    password: secret
+    pool:
+      min: 5
+      max: 100
+      idle_timeout_sec: 60
+
+
+# ── Schema registry ────────────────────────────────────────────────
+#
+# Maps database schema names to backend groups.
+# DBMesh extracts the schema from incoming SQL and routes to
+# the matching backend group.
+#
+# Per-schema overrides take precedence over global session and
+# routing settings.
+#
+# The `default` schema is a catch-all for unmatched schema names.
+#
+schemas:
+
+  - name: billing
+    backend_group: prod             # [required] backend group to route to
+    routing_policy: weighted        # overrides global routing.default_policy
+    session_recovery: STRICT        # overrides global session.recovery_mode
+    session_affinity: TRANSACTION   # overrides global session.affinity
+    read_write_split: true          # overrides global routing.read_write_split
+
+  - name: app
+    backend_group: prod
+    routing_policy: round_robin
+    session_recovery: BASIC
+    session_affinity: SCHEMA
+
+  - name: analytics
+    backend_group: analytics        # isolated to analytics group
+    routing_policy: least_connections
+    session_recovery: STATELESS
+    session_affinity: NONE
+    read_write_split: false         # all queries go to primary (no replicas)
+
+  - name: tenant_acme
+    backend_group: tenant-01
+    routing_policy: failover
+    session_recovery: ADVANCED
+    session_affinity: TRANSACTION
+
+  - name: default                   # catch-all — all unmatched schemas land here
+    backend_group: prod
+    routing_policy: round_robin
+    session_recovery: BASIC
+    session_affinity: SCHEMA
+
+
+# ── Routing ────────────────────────────────────────────────────────
+#
+# Global routing configuration. Per-schema settings in the schemas
+# section override these values.
+#
+routing:
+  default_policy: round_robin       # round_robin | weighted | failover |
+                                    # least_connections | latency | random
+
+  read_write_split: true            # route SELECT → replica, writes → primary
+  send_writes_to_primary: true      # always send INSERT/UPDATE/DELETE/DDL to primary
+
+  replication_aware: true           # exclude replicas exceeding max lag
+  max_replica_lag_ms: 500           # replica excluded from read pool if lag > this
+
+  # Tenant routing
+  # Applications set the tenant via a connection attribute.
+  # DBMesh resolves the tenant to a backend group.
+  tenants:
+    enabled: false
+    attribute_key: tenant           # connection attribute name
+    mappings:
+      - tenant: acme
+        backend_group: tenant-01
+      - tenant: globex
+        backend_group: prod
+      - tenant: initech
+        backend_group: prod
+
+
+# ── Session ────────────────────────────────────────────────────────
+#
+# Controls session tracking, recovery, and affinity globally.
+# All settings can be overridden per schema and per user.
+#
+# Recovery modes:
+#   STATELESS  No tracking. Maximum throughput. Lowest memory.
+#   BASIC      Track: USE, SET NAMES, autocommit, sql_mode, timezone.
+#   ADVANCED   Track: BASIC + session variables + prepared statements.
+#   STRICT     Track: ADVANCED + cursors + locks + transaction state.
+#
+# Affinity modes:
+#   NONE         Free routing — each query independently routed.
+#   SCHEMA       Pin session after first USE statement.
+#   BACKEND      Pin session to one backend for its entire lifetime.
+#   TRANSACTION  Pin during BEGIN..COMMIT, release after commit/rollback.
+#
+session:
+  recovery_mode: BASIC              # global default recovery mode
+  affinity: TRANSACTION             # global default affinity mode
+
+  # Tracker plugins to activate.
+  # The recovery mode controls which trackers are enabled at runtime.
+  # You can also specify trackers explicitly for a custom profile.
+  trackers:
+    - database                      # DatabaseTracker — USE statements
+    - variables                     # VariableTracker — SET session variables
+    - prepared_statements           # PreparedStatementTracker
+    - transaction                   # TransactionTracker — BEGIN/COMMIT state
+    - temp_tables                   # TempTableTracker — detect temp tables
+    - cursors                       # CursorTracker — open cursor state
+    - locks                         # LockTracker — advisory lock state
+
+  # Session lifetime limits
+  max_idle_sec: 300                 # kill idle client sessions after this
+  max_lifetime_sec: 3600            # maximum session lifetime regardless of activity
+
+  # Per-user overrides — highest precedence, overrides schema and global
+  per_user:
+    - user: reporting
+      recovery_mode: STATELESS
+      affinity: NONE
+    - user: payment_service
+      recovery_mode: STRICT
+      affinity: TRANSACTION
+    - user: analytics_reader
+      recovery_mode: STATELESS
+      affinity: NONE
+    - user: app_service
+      recovery_mode: BASIC
+      affinity: TRANSACTION
+
+
+# ── Failover ───────────────────────────────────────────────────────
+#
+# Failover policy, health checking, and query retry configuration.
+# These are independent controls:
+#
+#   failover.policy         — when to switch and how
+#   failover.health_check   — how to detect backend failure
+#   failover.query_recovery — whether to retry queries after failover
+#
+failover:
+  enabled: true
+
+  # Failover policy
+  # IMMEDIATE: switch the moment failure threshold is reached
+  # GRACEFUL:  wait for active queries to drain (grace_period_ms), then switch
+  # MANUAL:    mark backend failed, require operator action via API
+  policy: IMMEDIATE
+  grace_period_ms: 5000             # drain window for GRACEFUL policy
+
+  # Replica promotion
+  # When the primary fails, DBMesh can promote the most up-to-date replica.
+  promotion_enabled: true
+  promotion_strategy: most_recent   # most_recent | manual
+                                    # most_recent: elect replica with least lag
+
+  # Query retry after failover
+  # It is safe to retry idempotent SELECTs automatically.
+  # It is NOT safe to auto-retry writes — risk of duplicate execution.
+  query_recovery:
+    enabled: true
+    retry_selects: true
+    retry_writes: false             # never auto-retry — operator must handle
+    max_retries: 3
+    retry_delay_ms: 100             # delay between retry attempts
+    retry_backoff: exponential      # none | linear | exponential
+
+  # Health check configuration
+  # interval_ms:          how often to check each backend
+  # timeout_ms:           how long to wait for a health check response
+  # failure_threshold:    consecutive failures before marking FAILED
+  # recovery_threshold:   consecutive successes to transition FAILED → HEALTHY
+  # method:               tcp | login | query | replication
+  health_check:
+    interval_ms: 100
+    timeout_ms: 500
+    failure_threshold: 3
+    recovery_threshold: 2
+    method: query                   # tcp | login | query | replication
+    query: "SELECT 1"               # query to run when method: query
+
+
+# ── Cluster ────────────────────────────────────────────────────────
+#
+# Multi-node cluster configuration using SWIM-inspired gossip protocol.
+# Set node.mode: standalone to disable clustering entirely.
+#
+# All DBMesh nodes are active — any node can accept client connections.
+# State synchronized via gossip: schema registry, backend health,
+# membership, config versions.
+#
+cluster:
+  enabled: true
+  bind: 0.0.0.0
+  port: 7946                        # gossip protocol port
+
+  # Peer discovery
+  # static: explicit list of seed nodes
+  # dns:    DNS A record resolving to peer IPs
+  # hybrid: both methods active simultaneously
+  discovery: hybrid
+
+  seed_nodes:                       # used when discovery: static | hybrid
+    - 10.0.0.1:7946
+    - 10.0.0.2:7946
+    - 10.0.0.3:7946
+
+  seed_dns: dbmesh.internal         # used when discovery: dns | hybrid
+
+  gossip:
+    interval_ms: 200                # gossip round interval
+    fanout: 3                       # peers to contact per gossip round
+    suspicion_mult: 4               # SWIM suspicion timeout multiplier
+    retransmit_mult: 4              # retransmit multiplier for reliability
+
+    # State keys synchronized across the cluster
+    sync_keys:
+      - schema_registry             # schema-to-backend-group mappings
+      - backend_state               # health state of all backends
+      - membership                  # node join/leave events
+      - health                      # per-backend health status
+      - config_versions             # config change sequence numbers
+
+
+# ── Authentication ─────────────────────────────────────────────────
+#
+# Controls how clients authenticate to DBMesh.
+# DBMesh authenticates to databases using credentials in the backends section.
+#
+auth:
+  # Primary authentication method for client connections
+  # local: username/password validated against users_file
+  # ldap:  bind against LDAP/Active Directory
+  # jwt:   validate signed JWT token passed as password
+  method: local
+
+  local:
+    users_file: /etc/dbmesh/users.yaml   # see users.yaml reference below
+
+  ldap:
+    enabled: false
+    url: ldap://ldap.internal:389
+    base_dn: dc=company,dc=com
+    bind_dn: cn=dbmesh,dc=company,dc=com
+    bind_password: secret
+    user_filter: "(uid={user})"          # {user} replaced with connecting username
+    group_attribute: memberOf
+    timeout_ms: 3000
+    start_tls: false
+
+  jwt:
+    enabled: false
+    algorithm: RS256                     # RS256 | HS256
+    public_key: /etc/dbmesh/jwt.pub      # RS256: path to public key file
+    secret: ""                           # HS256: shared secret
+    issuer: https://auth.company.com
+    audience: dbmesh
+    leeway_sec: 30                       # clock skew tolerance
+
+# RBAC role assignment
+# Roles: admin | operator | auditor | viewer
+# See roles.yaml for permission definitions.
+rbac:
+  enabled: true
+  roles_file: /etc/dbmesh/roles.yaml
+
+
+# ── Query firewall ─────────────────────────────────────────────────
+#
+# Intercept and block dangerous SQL patterns before they reach backends.
+# Rules are evaluated in order. First matching rule wins.
+#
+# Actions:
+#   block   Return an error to the client. Query not forwarded.
+#   warn    Log the query with WARN level and allow it through.
+#   log     Record the query to audit log and allow it through.
+#
+firewall:
+  enabled: true
+  default_action: allow             # allow | block (when no rule matches)
+
+  rules:
+    - name: no-drop-database
+      match: "DROP DATABASE"        # case-insensitive substring match
+      action: block
+      message: "DROP DATABASE is not permitted via DBMesh"
+
+    - name: no-drop-table
+      match: "DROP TABLE"
+      action: block
+
+    - name: no-truncate
+      match: "TRUNCATE"
+      action: block
+
+    - name: no-unfiltered-delete
+      match_regex: 'DELETE\s+FROM\s+\w+\s*;'   # DELETE without WHERE
+      action: block
+
+    - name: warn-alter-table
+      match: "ALTER TABLE"
+      action: warn                  # log but allow schema migrations
+
+    - name: log-grant
+      match: "GRANT"
+      action: log
+
+
+# ── Rate limiting ──────────────────────────────────────────────────
+#
+# Token-bucket rate limiting applied before query routing.
+# Limits can be applied per-user, per-IP, per-schema, and per-tenant.
+# All dimensions are independent — a query must pass all enabled limits.
+#
+rate_limit:
+  enabled: true
+
+  per_user:
+    enabled: true
+    default_qps: 5000               # default for users without an override
+    burst_multiplier: 2             # allow bursts up to qps * burst_multiplier
+    overrides:
+      - user: reporting
+        qps: 500                    # reporting is rate-limited to 500 QPS
+      - user: payment_service
+        qps: 20000                  # payment service gets higher limit
+      - user: analytics_reader
+        qps: 1000
+
+  per_ip:
+    enabled: false
+    default_qps: 10000
+    burst_multiplier: 1.5
+
+  per_schema:
+    enabled: true
+    overrides:
+      - schema: analytics
+        qps: 2000                   # protect analytics backend from overload
+      - schema: billing
+        qps: 10000
+
+  per_tenant:
+    enabled: false
+    default_qps: 5000
+    overrides:
+      - tenant: acme
+        qps: 10000
+
+
+# ── Management API ─────────────────────────────────────────────────
+#
+# REST API for managing DBMesh configuration, backends, schemas,
+# sessions, and triggering operational actions.
+#
+# All API endpoints require a valid auth token unless auth: false.
+#
+api:
+  enabled: true
+  bind: 127.0.0.1                   # recommend loopback or internal network only
+  port: 8080
+  auth: true                        # require auth token for all API requests
+  token_file: /etc/dbmesh/api_token # file containing the API bearer token
+
+  # Admin UI — React + TypeScript management interface
+  ui:
+    enabled: true
+    path: /ui                       # served at http://<host>:<port>/ui
+
+  cors:
+    enabled: false
+    origins:
+      - http://localhost:3000       # add origins as needed for development
+      - https://admin.company.com
+
+  # Request limits
+  max_request_body_kb: 512
+  request_timeout_ms: 10000
+
+
+# ── Metrics ────────────────────────────────────────────────────────
+#
+# Prometheus metrics and OpenTelemetry distributed tracing.
+#
+metrics:
+  prometheus:
+    enabled: true
+    bind: 0.0.0.0
+    port: 9090
+    path: /metrics
+    auth: false                     # set true to require token for /metrics
+
+  tracing:
+    enabled: false
+    exporter: otlp                  # otlp | jaeger | zipkin
+    endpoint: http://otel-collector:4318  # HTTP OTLP (4317 = gRPC, 4318 = HTTP)
+    service_name: dbmesh
+    service_version: "1.0.0"
+    sample_rate: 0.1                # fraction of queries to trace (0.0 - 1.0)
+    propagation: w3c                # w3c | b3 | jaeger
+
+
+# ── Logging ────────────────────────────────────────────────────────
+#
+# Application log and audit log configuration.
+#
+# The audit log captures:
+#   - All management API calls (reads and writes)
+#   - Authentication events (success and failure)
+#   - Failover events (detection, promotion, recovery)
+#   - Configuration changes
+#
+logging:
+  level: INFO                       # TRACE | DEBUG | INFO | WARN | ERROR | FATAL
+  format: json                      # json | text
+  output: stdout                    # stdout | file | both
+
+  file:
+    path: /var/log/dbmesh/dbmesh.log
+    rotate: true
+    max_size_mb: 100                # rotate when file exceeds this size
+    max_backups: 7                  # keep this many rotated files
+    compress: true                  # gzip rotated files
+
+  audit:
+    enabled: true
+    output: both                    # stdout | file | both | db
+                                    # db: store in SQLite (queryable via API)
+    file: /var/log/dbmesh/audit.log
+    log_queries: false              # log every SQL statement (very verbose)
+    log_connections: true           # log client connect/disconnect
+    log_failovers: true             # log failover detection and recovery
+    log_auth: true                  # log authentication attempts
+    log_config_changes: true        # log all API-driven config changes
+    log_firewall_hits: true         # log firewall rule matches
+
+
+# ──────────────────────────────────────────────────────────────────
+# Reference: users.yaml
+# ──────────────────────────────────────────────────────────────────
+#
+# Companion file for local authentication.
+# Passwords are bcrypt hashed. Generate with:
+#   dbmesh hash-password <password>
+#
+# users:
+#   - username: app_service
+#     password_hash: $2b$12$...
+#     role: operator
+#     schemas:
+#       - billing
+#       - app
+#       - default
+#     max_connections: 1000
+#
+#   - username: reporting
+#     password_hash: $2b$12$...
+#     role: viewer
+#     schemas:
+#       - analytics
+#     max_connections: 50
+#
+#   - username: payment_service
+#     password_hash: $2b$12$...
+#     role: operator
+#     schemas:
+#       - billing
+#     max_connections: 200
+#
+#   - username: admin
+#     password_hash: $2b$12$...
+#     role: admin
+#     schemas: ["*"]               # access all schemas
+
+
+# ──────────────────────────────────────────────────────────────────
+# Reference: roles.yaml
+# ──────────────────────────────────────────────────────────────────
+#
+# RBAC role definitions. Maps role names to allowed API endpoints.
+#
+# roles:
+#   admin:
+#     description: Full access to all resources
+#     allow:
+#       - "*"
+#
+#   operator:
+#     description: Manage backends and schemas, trigger failover
+#     allow:
+#       - GET  /api/v1/*
+#       - POST /api/v1/backends
+#       - PUT  /api/v1/backends/*
+#       - POST /api/v1/schemas
+#       - PUT  /api/v1/schemas/*
+#       - POST /api/v1/failover
+#       - POST /api/v1/config/reload
+#     deny:
+#       - DELETE /api/v1/*
+#
+#   auditor:
+#     description: Read-only access to audit logs and metrics
+#     allow:
+#       - GET /api/v1/audit-logs
+#       - GET /api/v1/metrics
+#       - GET /api/v1/nodes
+#
+#   viewer:
+#     description: Read-only dashboard access
+#     allow:
+#       - GET /api/v1/schemas
+#       - GET /api/v1/backends
+#       - GET /api/v1/nodes
+#       - GET /api/v1/sessions
+#       - GET /api/v1/metrics

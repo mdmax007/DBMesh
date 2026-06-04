@@ -1,0 +1,99 @@
+services:
+
+  # ── DBMesh ─────────────────────────────────────────────────────────────
+  dbmesh:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "3306:3306"
+      - "8080:8080"
+      - "9090:9090"
+    volumes:
+      - ./dbmesh.yaml:/etc/dbmesh/dbmesh.yaml:ro
+      - dbmesh_data:/var/lib/dbmesh
+    environment:
+      DBMESH_MASTER_KEY: "dev-master-key-change-in-production"
+    depends_on:
+      mysql-primary:
+        condition: service_healthy
+    networks:
+      - dbmesh_net
+    restart: unless-stopped
+
+  # ── MySQL primary ───────────────────────────────────────────────────────
+  mysql-primary:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_USER: dbmesh
+      MYSQL_PASSWORD: dbmesh_password
+    ports:
+      - "33060:3306"
+    volumes:
+      - mysql_primary_data:/var/lib/mysql
+      - ./docker/mysql-primary.cnf:/etc/mysql/conf.d/replication.cnf:ro
+      - ./docker/mysql-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1",
+             "-u", "root", "-prootpassword", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks:
+      - dbmesh_net
+
+  # ── MySQL replica ───────────────────────────────────────────────────────
+  mysql-replica:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+    ports:
+      - "33061:3306"
+    volumes:
+      - mysql_replica_data:/var/lib/mysql
+      - ./docker/mysql-replica.cnf:/etc/mysql/conf.d/replication.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1",
+             "-u", "root", "-prootpassword", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    depends_on:
+      mysql-primary:
+        condition: service_healthy
+    networks:
+      - dbmesh_net
+
+  # ── Prometheus ─────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - dbmesh_net
+    profiles: ["monitoring"]  # only started with: docker-compose --profile monitoring up
+
+  # ── Grafana ────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    networks:
+      - dbmesh_net
+    profiles: ["monitoring"]
+
+volumes:
+  dbmesh_data:
+  mysql_primary_data:
+  mysql_replica_data:
+
+networks:
+  dbmesh_net:
+    driver: bridge

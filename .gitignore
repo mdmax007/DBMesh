@@ -1,0 +1,85 @@
+# ── Build directories ───────────────────────────────────────────────────
+build/
+build-*/
+cmake-build-*/
+out/
+
+# ── CMake generated ─────────────────────────────────────────────────────
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+compile_commands.json
+_deps/
+
+# ── Ninja ───────────────────────────────────────────────────────────────
+.ninja_deps
+.ninja_log
+build.ninja
+
+# ── Object files ────────────────────────────────────────────────────────
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.lib
+*.dll
+
+# ── IDE / editor ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln
+.clangd/
+.cache/
+*.swp
+*.swo
+*~
+
+# ── Node.js (UI) ────────────────────────────────────────────────────────
+node_modules/
+ui/dist/
+ui/dist-ssr/
+ui/.vite/
+ui/*.tsbuildinfo
+
+# ── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# ── OS ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ────────────────────────────────────────────────────────────────
+*.log
+*.log.*
+
+# ── Secrets and credentials (NEVER commit these) ────────────────────────
+*.key
+*.pem
+*.crt
+api_token
+users.yaml
+roles.yaml
+.env
+.env.*
+secrets/
+
+# ── Runtime ─────────────────────────────────────────────────────────────
+*.pid
+dbmesh.db
+dbmesh.db-shm
+dbmesh.db-wal
+/var/
+architecture.md
+node_modules
+CLAUDE.md
+plan.md

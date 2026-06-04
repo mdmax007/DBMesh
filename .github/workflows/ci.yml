@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  # ── Build and unit test matrix ─────────────────────────────────────────
+  build-test:
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - { cc: clang-16, cxx: clang++-16, pkg: clang-16 }
+          - { cc: clang-17, cxx: clang++-17, pkg: clang-17 }
+          - { cc: gcc-13,   cxx: g++-13,     pkg: gcc-13 g++-13 }
+        build_type: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add LLVM apt repository
+        if: startsWith(matrix.compiler.cc, 'clang')
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-${{ matrix.compiler.pkg == 'clang-16' && '16' || '17' }} main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+
+      - name: Add GCC 13 PPA
+        if: matrix.compiler.cc == 'gcc-13'
+        run: |
+          sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+          sudo apt-get update
+
+      - name: Install compiler and dependencies
+        run: |
+          sudo apt-get install -y \
+            ${{ matrix.compiler.pkg }} \
+            cmake ninja-build \
+            libboost-all-dev \
+            libyaml-cpp-dev \
+            libsqlite3-dev \
+            libssl-dev
+
+      - name: Configure
+        run: |
+          cmake -GNinja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_C_COMPILER=${{ matrix.compiler.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler.cxx }} \
+            -B build
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j$(nproc)
+
+  # ── Formatting check ───────────────────────────────────────────────────
+  lint-format:
+    name: clang-format check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format-16
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-16 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-format-16
+
+      - name: Check formatting
+        run: |
+          find . \( -name "*.cpp" -o -name "*.h" \) \
+            -not -path "./build*" -not -path "./_deps/*" \
+            | xargs clang-format-16 --dry-run --Werror
+
+  # ── clang-tidy ─────────────────────────────────────────────────────────
+  lint-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 16 and dependencies
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-16 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-16 clang++-16 clang-tidy-16 \
+            cmake ninja-build \
+            libboost-all-dev libyaml-cpp-dev libsqlite3-dev libssl-dev
+
+      - name: Configure (generates compile_commands.json)
+        run: |
+          cmake -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang-16 \
+            -DCMAKE_CXX_COMPILER=clang++-16 \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -B build
+
+      - name: Run clang-tidy
+        run: |
+          find . -name "*.cpp" \
+            -not -path "./build*" -not -path "./_deps/*" \
+            | xargs -P$(nproc) clang-tidy-16 -p build --quiet
+
+  # ── Docker build ───────────────────────────────────────────────────────
+  docker:
+    name: Docker build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -f docker/Dockerfile -t dbmesh:ci .
+
+  # ── Integration tests (on PRs to main only) ────────────────────────────
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request'
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y \
+            cmake ninja-build clang-16 \
+            libboost-all-dev libyaml-cpp-dev libsqlite3-dev libssl-dev
+
+      - name: Start test databases
+        run: docker-compose -f tests/docker-compose.yml up -d
+
+      - name: Wait for MySQL to be ready
+        run: |
+          for i in $(seq 1 30); do
+            docker-compose -f tests/docker-compose.yml exec -T mysql-primary \
+              mysqladmin ping -h localhost -u root -prootpassword --silent && break
+            echo "Waiting for MySQL... $i/30"
+            sleep 2
+          done
+
+      - name: Build and run integration tests
+        run: |
+          cmake -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang-16 -DCMAKE_CXX_COMPILER=clang++-16 \
+            -B build
+          ninja -C build
+          ctest --test-dir build --output-on-failure -L integration -j$(nproc)
+
+      - name: Stop test databases
+        if: always()
+        run: docker-compose -f tests/docker-compose.yml down -v

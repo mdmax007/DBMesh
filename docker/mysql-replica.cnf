@@ -1,0 +1,8 @@
+[mysqld]
+server-id              = 2
+relay-log              = relay-bin
+read-only              = ON
+gtid-mode              = ON
+enforce-gtid-consistency = ON
+log-bin                = mysql-bin
+log-replica-updates    = ON
