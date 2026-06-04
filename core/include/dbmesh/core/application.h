@@ -13,6 +13,8 @@
 #include <thread>
 #include <vector>
 
+namespace dbmesh::protocol::mysql { class MySqlFrontend; }
+
 namespace dbmesh {
 
 // Application owns every subsystem and defines the startup / shutdown order.
@@ -49,6 +51,8 @@ class Application {
 
   std::atomic<bool>                 shutting_down_{false};
   std::string                       pid_file_path_;
+
+  std::unique_ptr<protocol::mysql::MySqlFrontend> mysql_frontend_;
 };
 
 } // namespace dbmesh

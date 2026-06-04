@@ -1,4 +1,5 @@
 #include "dbmesh/core/application.h"
+#include "dbmesh/protocol/mysql/mysql_frontend.h"
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
@@ -35,7 +36,14 @@ Application::~Application() {
 int Application::run() {
   write_pid_file();
   arm_signals();
-  start_subsystems();
+
+  try {
+    start_subsystems();
+  } catch (const std::exception& e) {
+    logger_->fatal(std::string("startup failed: ") + e.what());
+    Logger::shutdown();
+    return EXIT_FAILURE;
+  }
 
   logger_->info("accepting connections");
 
@@ -103,14 +111,23 @@ void Application::on_config_reload(std::shared_ptr<const Config> new_config) {
 }
 
 void Application::start_subsystems() {
-  // Milestone 1.2+: start MySQL frontend
+  if (config_->listeners.mysql.enabled) {
+    mysql_frontend_ = std::make_unique<protocol::mysql::MySqlFrontend>(
+        io_context_, config_);
+    mysql_frontend_->start();
+    logger_->info("MySQL frontend listening on port " +
+                  std::to_string(config_->listeners.mysql.port));
+  }
   // Milestone 1.3+: init pool manager
   // Milestone 1.7+: start health monitor
   // Milestone 1.12+: start HTTP API server
 }
 
 void Application::stop_subsystems() {
-  // Shutdown in reverse-start order.
+  if (mysql_frontend_) {
+    mysql_frontend_->stop();
+    mysql_frontend_.reset();
+  }
   logger_->info("all subsystems stopped");
 }
 

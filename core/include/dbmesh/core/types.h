@@ -31,8 +31,9 @@ struct SessionID {
     return boost::uuids::to_string(value);
   }
 
-  auto operator<=>(const SessionID&) const = default;
-  bool operator==(const SessionID&) const  = default;
+  bool operator==(const SessionID& o) const noexcept { return value == o.value; }
+  bool operator!=(const SessionID& o) const noexcept { return value != o.value; }
+  bool operator< (const SessionID& o) const noexcept { return value  < o.value; }
 
   struct Hash {
     std::size_t operator()(const SessionID& id) const noexcept {

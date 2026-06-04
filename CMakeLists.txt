@@ -52,6 +52,9 @@ target_link_libraries(dbmesh PRIVATE
   dbmesh_warnings
   Threads::Threads
 )
+# dbmesh binary links dbmesh_asan directly so non-coroutine code is still
+# covered by ASAN even though protocol/mysql opts out.
+target_link_libraries(dbmesh PRIVATE dbmesh_asan)
 install(TARGETS dbmesh RUNTIME DESTINATION bin)
 
 # ── CLI tool ────────────────────────────────────────────────────────────

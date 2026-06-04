@@ -13,6 +13,14 @@ target_link_libraries(dbmesh_core PUBLIC
   yaml-cpp
   Threads::Threads
 )
+# dbmesh_asan is PRIVATE so coroutine modules (dbmesh_protocol_mysql) that
+# depend on dbmesh_core do NOT inherit ASAN flags from us.
+target_link_libraries(dbmesh_core PRIVATE dbmesh_asan)
+# application.cpp includes mysql_frontend.h. We add the include path here
+# without creating a link-time circular dep; the binary links both libraries.
+target_include_directories(dbmesh_core PRIVATE
+  ${CMAKE_SOURCE_DIR}/protocol/mysql/include
+)
 
 if(DBMESH_BUILD_TESTS)
   add_executable(test_dbmesh_core

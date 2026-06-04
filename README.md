@@ -30,6 +30,29 @@ DBMesh is a high-performance, distributed database routing mesh written in C++20
 
 ---
 
+## Project status
+
+> ⚠️ **Early active development.** DBMesh is being built milestone by milestone
+> (Phase 1: MySQL + MariaDB). This README describes the full intended product;
+> not all of it is implemented yet. See [`plan.md`](plan.md) for the live
+> milestone checklist.
+>
+> **Working today:** process lifecycle + config + structured logging
+> (Milestone 1.1) and the MySQL wire-protocol frontend — a real `mysql` client
+> can connect, authenticate, and query (Milestone 1.2). Query routing,
+> connection pooling, failover, clustering, and the admin API/UI are upcoming.
+>
+> **Building from source** (dev toolchain — Clang 14 / Boost 1.74 on Ubuntu
+> 22.04; see [`CLAUDE.md`](CLAUDE.md) for the full constraint list):
+>
+> ```bash
+> cmake -GNinja -DCMAKE_BUILD_TYPE=Debug \
+>   -DCMAKE_C_COMPILER=clang-14 -DCMAKE_CXX_COMPILER=clang++-14 -B build
+> ninja -C build && ctest --test-dir build --output-on-failure
+> ```
+
+---
+
 ## Why DBMesh?
 
 Modern SaaS and enterprise platforms manage hundreds or thousands of databases across MySQL, MariaDB, PostgreSQL, AWS RDS, multi-region deployments, and database-per-tenant architectures.
