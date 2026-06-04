@@ -10,7 +10,7 @@
 
 ---
 
-DBMesh is a high-performance, distributed database routing mesh written in C++20. It provides a single endpoint for applications while transparently routing traffic to the correct backend database based on schemas, tenants, routing policies, and cluster state — without requiring any application changes.
+DBMesh is a high-performance, distributed database routing mesh written in C++20. It provides a single endpoint for applications while transparently routing traffic to the correct backend database based on schemas, tenants, routing policies, and cluster state - without requiring any application changes.
 
 ```text
                         Applications
@@ -33,17 +33,17 @@ DBMesh is a high-performance, distributed database routing mesh written in C++20
 ## Project status
 
 > ⚠️ **Early active development.** DBMesh is being built milestone by milestone
-> (Phase 1: MySQL + MariaDB). This README describes the full intended product;
+> (Phase 1: MySQL + MariaDB). This README describes the full intended product.
 > not all of it is implemented yet. See [`plan.md`](plan.md) for the live
 > milestone checklist.
 >
 > **Working today:** process lifecycle + config + structured logging
-> (Milestone 1.1) and the MySQL wire-protocol frontend — a real `mysql` client
+> (Milestone 1.1) and the MySQL wire-protocol frontend - a real `mysql` client
 > can connect, authenticate, and query (Milestone 1.2). Query routing,
 > connection pooling, failover, clustering, and the admin API/UI are upcoming.
 >
-> **Building from source** (dev toolchain — Clang 14 / Boost 1.74 on Ubuntu
-> 22.04; 
+> **Building from source** (dev toolchain - Clang 14 / Boost 1.74 on Ubuntu
+> 22.04. 
 >
 > ```bash
 > cmake -GNinja -DCMAKE_BUILD_TYPE=Debug \
@@ -91,7 +91,7 @@ DBMesh abstracts all of this. Applications connect to one endpoint. DBMesh handl
 Route queries automatically based on schema names extracted directly from SQL.
 
 ```sql
-SELECT * FROM billing.users;
+SELECT * FROM billing.users.
 ```
 
 DBMesh resolves:
@@ -109,8 +109,8 @@ No application changes required.
 DBMesh tracks session state and routes subsequent queries automatically after a `USE` statement.
 
 ```sql
-USE billing;
-SELECT * FROM users;   -- automatically routed to billing backend group
+USE billing.
+SELECT * FROM users.   -- automatically routed to billing backend group
 ```
 
 ---
@@ -160,7 +160,7 @@ Replication-aware: replicas exceeding the configured lag threshold are automatic
 | `latency` | Route to backend with lowest recent response time |
 | `random` | Random backend selection |
 | `failover` | Primary with ordered fallback list |
-| `consistent_hashing` | Planned — deterministic key-based routing |
+| `consistent_hashing` | Planned - deterministic key-based routing |
 
 Policies are configurable globally, per schema, and per tenant.
 
@@ -168,7 +168,7 @@ Policies are configurable globally, per schema, and per tenant.
 
 ### Multi-Tenant Routing
 
-Map tenants to specific database clusters. Applications connect to DBMesh using a tenant attribute; DBMesh resolves the correct backend group.
+Map tenants to specific database clusters. Applications connect to DBMesh using a tenant attribute. DBMesh resolves the correct backend group.
 
 ```text
 tenant: acme    →  mysql-cluster-us-east
@@ -235,7 +235,7 @@ Tracks all recoverable session state:
 - Everything in ADVANCED
 - Open cursors
 - Advisory locks
-- Temp table existence (detection only — cannot recreate)
+- Temp table existence (detection only - cannot recreate)
 - Full transaction state
 
 If a session cannot be recovered (e.g. a temp table existed on the failed backend), DBMesh returns `SESSION_RECOVERY_FAILED` to the client rather than silently continuing on a broken session.
@@ -312,12 +312,12 @@ Controls when DBMesh pins a session to a specific backend.
 
 | Mode | Behaviour |
 |---|---|
-| `NONE` | Free routing — each query routed independently |
+| `NONE` | Free routing - each query routed independently |
 | `SCHEMA` | Session pinned after first `USE` statement |
 | `BACKEND` | Session pinned to one backend for its entire lifetime |
 | `TRANSACTION` | Pinned during `BEGIN..COMMIT`, released after |
 
-`TRANSACTION` is the recommended default for most workloads — it prevents cross-backend splits mid-transaction while allowing free routing for non-transactional queries.
+`TRANSACTION` is the recommended default for most workloads - it prevents cross-backend splits mid-transaction while allowing free routing for non-transactional queries.
 
 ---
 
@@ -347,8 +347,8 @@ Configurable failure threshold (consecutive failures before marking failed) and 
 ```yaml
 failover:
   query_recovery:
-    retry_selects: true   # safe — idempotent reads can be retried
-    retry_writes: false   # never auto-retry writes — risk of duplicate execution
+    retry_selects: true   # safe - idempotent reads can be retried
+    retry_writes: false   # never auto-retry writes - risk of duplicate execution
     max_retries: 3
     retry_delay_ms: 100
 ```
@@ -407,9 +407,9 @@ cluster:
 
 #### TLS
 
-- **Frontend TLS** — encrypt all client-to-DBMesh connections
-- **Backend TLS** — encrypt all DBMesh-to-database connections
-- **Mutual TLS (mTLS)** — require and verify client certificates
+- **Frontend TLS** - encrypt all client-to-DBMesh connections
+- **Backend TLS** - encrypt all DBMesh-to-database connections
+- **Mutual TLS (mTLS)** - require and verify client certificates
 - Configurable minimum TLS version
 
 #### Authentication
@@ -425,7 +425,7 @@ cluster:
 
 | Role | Permissions |
 |---|---|
-| `admin` | Full access — all API endpoints, all configuration |
+| `admin` | Full access - all API endpoints, all configuration |
 | `operator` | Manage backends, trigger failover, view sessions |
 | `auditor` | Read-only access to audit logs and metrics |
 | `viewer` | Read-only access to dashboards and session state |
@@ -618,21 +618,21 @@ manager  registry    layer        manager     engine      pool mgr
 
 ### Internal components
 
-**Frontend protocol layer** — handles authentication, SSL negotiation, session creation, and query parsing. Separate implementations for MySQL/MariaDB and PostgreSQL wire protocols.
+**Frontend protocol layer** - handles authentication, SSL negotiation, session creation, and query parsing. Separate implementations for MySQL/MariaDB and PostgreSQL wire protocols.
 
-**Query router** — extracts schema from SQL, resolves tenant, selects backend, enforces routing policy and firewall rules. O(1) lookup via hash-indexed schema registry.
+**Query router** - extracts schema from SQL, resolves tenant, selects backend, enforces routing policy and firewall rules. O(1) lookup via hash-indexed schema registry.
 
-**Session manager** — stores per-session state: ID, user, schema, backend, session variables, prepared statements, transaction state. Drives tracker plugin framework.
+**Session manager** - stores per-session state: ID, user, schema, backend, session variables, prepared statements, transaction state. Drives tracker plugin framework.
 
-**Connection pool manager** — per-backend pools with primary and replica pools managed independently. Pool warming, idle cleanup, health-aware connection allocation.
+**Connection pool manager** - per-backend pools with primary and replica pools managed independently. Pool warming, idle cleanup, health-aware connection allocation.
 
-**Health monitor** — configurable check methods (TCP, login, query, replication). Maintains backend state machine: `HEALTHY → DEGRADED → FAILED → RECOVERING → HEALTHY`.
+**Health monitor** - configurable check methods (TCP, login, query, replication). Maintains backend state machine: `HEALTHY → DEGRADED → FAILED → RECOVERING → HEALTHY`.
 
-**Failover engine** — detects failure via health monitor, executes failover policy (IMMEDIATE/GRACEFUL/MANUAL), promotes replicas, migrates sessions, replays recovery state.
+**Failover engine** - detects failure via health monitor, executes failover policy (IMMEDIATE/GRACEFUL/MANUAL), promotes replicas, migrates sessions, replays recovery state.
 
-**Cluster manager** — manages node membership via SWIM-inspired gossip. Handles peer discovery (static, DNS, hybrid). Synchronizes schema registry, backend state, health, and config versions across all nodes in under 1 second.
+**Cluster manager** - manages node membership via SWIM-inspired gossip. Handles peer discovery (static, DNS, hybrid). Synchronizes schema registry, backend state, health, and config versions across all nodes in under 1 second.
 
-**Persistence layer** — SQLite storage for schemas, backends, nodes, users, roles, audit logs, and routing rules. Gossip-synchronized across the cluster.
+**Persistence layer** - SQLite storage for schemas, backends, nodes, users, roles, audit logs, and routing rules. Gossip-synchronized across the cluster.
 
 ---
 
@@ -767,15 +767,15 @@ dbmesh/
 
 ## Roadmap
 
-### Phase 1 — MySQL + MariaDB *(current)*
+### Phase 1 - MySQL + MariaDB *(current)*
 
 Full feature set against MySQL and MariaDB: read/write splitting, schema routing, tenant routing, connection pooling, session recovery framework, failover engine, gossip clustering, security (TLS, RBAC, LDAP, JWT), query firewall, rate limiting, management API, admin UI, Prometheus metrics, OpenTelemetry tracing.
 
-### Phase 2 — PostgreSQL
+### Phase 2 - PostgreSQL
 
 PostgreSQL wire protocol frontend plugs into the existing infrastructure. New additions: PG extended query protocol (Parse/Bind/Execute), `search_path` tracker, portal tracker, replication slot monitoring, `pg_promote()` support.
 
-### Phase 3 — Cloud databases
+### Phase 3 - Cloud databases
 
 AWS RDS adapters for MySQL, MariaDB, and PostgreSQL. RDS endpoint validation, Multi-AZ failover awareness, Amazon Aurora writer/reader endpoint mapping.
 
@@ -792,15 +792,15 @@ AWS RDS adapters for MySQL, MariaDB, and PostgreSQL. RDS endpoint validation, Mu
 
 ## Use Cases
 
-**SaaS platforms** — database-per-tenant architecture with a single application endpoint. Add tenants and reassign schemas without application changes.
+**SaaS platforms** - database-per-tenant architecture with a single application endpoint. Add tenants and reassign schemas without application changes.
 
-**Managed database providers** — centralized routing, failover, and observability across thousands of customer databases.
+**Managed database providers** - centralized routing, failover, and observability across thousands of customer databases.
 
-**Enterprise applications** — unify routing across multi-database environments without modifying application connection strings.
+**Enterprise applications** - unify routing across multi-database environments without modifying application connection strings.
 
-**Cloud migrations** — route traffic to on-premise or cloud backends interchangeably. Migrate databases behind DBMesh with zero application changes.
+**Cloud migrations** - route traffic to on-premise or cloud backends interchangeably. Migrate databases behind DBMesh with zero application changes.
 
-**Hybrid deployments** — mix on-premise and cloud databases in the same routing mesh.
+**Hybrid deployments** - mix on-premise and cloud databases in the same routing mesh.
 
 ---
 
