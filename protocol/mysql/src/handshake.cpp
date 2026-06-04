@@ -58,7 +58,78 @@ std::vector<uint8_t> HandshakeV10::encode() const {
   return buf;
 }
 
+Result<HandshakeV10, std::string>
+HandshakeV10::decode(const std::vector<uint8_t>& payload) {
+  if (payload.empty() || payload[0] != 0x0A)
+    return Err(std::string("not a HandshakeV10 packet"));
+
+  HandshakeV10 hs;
+  std::size_t pos = 1;
+
+  hs.server_version = read_null_str(payload.data(), payload.size(), &pos);
+  if (pos + 4 > payload.size()) return Err(std::string("truncated handshake"));
+  hs.connection_id = read_u32_le(payload.data() + pos); pos += 4;
+
+  // auth-plugin-data part 1 (8 bytes)
+  if (pos + 8 > payload.size()) return Err(std::string("truncated auth data 1"));
+  for (int i = 0; i < 8; ++i) hs.auth_data[static_cast<std::size_t>(i)] = payload[pos++];
+  pos += 1;  // filler 0x00
+
+  if (pos + 2 > payload.size()) return Err(std::string("truncated caps low"));
+  uint32_t cap_low = read_u16_le(payload.data() + pos); pos += 2;
+
+  uint32_t cap_high = 0;
+  uint8_t  auth_data_len = 0;
+  if (pos < payload.size()) {
+    hs.character_set = payload[pos++];
+    if (pos + 2 <= payload.size()) { hs.status_flags = read_u16_le(payload.data() + pos); pos += 2; }
+    if (pos + 2 <= payload.size()) { cap_high = read_u16_le(payload.data() + pos); pos += 2; }
+    if (pos < payload.size()) auth_data_len = payload[pos++];
+    pos += 10;  // reserved
+  }
+  hs.capability_flags = cap_low | (cap_high << 16);
+
+  // auth-plugin-data part 2 (>= 13 bytes incl. trailing null; we read 12 salt bytes)
+  if ((hs.capability_flags & caps::SECURE_CONNECTION) && pos < payload.size()) {
+    int part2 = std::max(13, static_cast<int>(auth_data_len) - 8);
+    int salt2 = std::min(12, part2 - 1);  // exclude trailing null
+    for (int i = 0; i < salt2 && pos < payload.size(); ++i)
+      hs.auth_data[static_cast<std::size_t>(8 + i)] = payload[pos++];
+    // skip any remaining part2 bytes (incl. null)
+    pos += static_cast<std::size_t>(part2 - salt2);
+  }
+
+  if ((hs.capability_flags & caps::PLUGIN_AUTH) && pos < payload.size())
+    hs.auth_plugin_name = read_null_str(payload.data(), payload.size(), &pos);
+
+  return Ok(std::move(hs));
+}
+
 // ── HandshakeResponse41 ───────────────────────────────────────────────────
+
+std::vector<uint8_t> HandshakeResponse41::encode() const {
+  std::vector<uint8_t> buf;
+  buf.reserve(64 + username.size() + auth_response.size() + database.size());
+
+  write_u32_le(buf, capability_flags);
+  write_u32_le(buf, max_packet_size);
+  write_u8(buf, character_set);
+  for (int i = 0; i < 23; ++i) write_u8(buf, 0x00);  // reserved
+
+  write_null_str(buf, username);
+
+  // Auth response (length-prefixed; SECURE_CONNECTION style)
+  write_u8(buf, static_cast<uint8_t>(auth_response.size()));
+  write_bytes(buf, auth_response.data(), auth_response.size());
+
+  if (capability_flags & caps::CONNECT_WITH_DB)
+    write_null_str(buf, database);
+
+  if (capability_flags & caps::PLUGIN_AUTH)
+    write_null_str(buf, auth_plugin.empty() ? NATIVE_PASSWORD : auth_plugin);
+
+  return buf;
+}
 
 Result<HandshakeResponse41, std::string>
 HandshakeResponse41::decode(const std::vector<uint8_t>& payload) {
@@ -104,34 +175,36 @@ HandshakeResponse41::decode(const std::vector<uint8_t>& payload) {
   return Ok(std::move(r));
 }
 
-// ── mysql_native_password verification ───────────────────────────────────
+// ── mysql_native_password ─────────────────────────────────────────────────
+
+namespace {
+
+// Computes h3 = SHA1(salt + SHA1(SHA1(password))) and h1 = SHA1(password).
+void native_hashes(const std::string& pwd, const std::array<uint8_t, 20>& salt,
+                   std::array<uint8_t, 20>& h1, std::array<uint8_t, 20>& h3) {
+  SHA1(reinterpret_cast<const unsigned char*>(pwd.data()), pwd.size(), h1.data());
+  std::array<uint8_t, 20> h2{};
+  SHA1(h1.data(), h1.size(), h2.data());
+  std::vector<uint8_t> salted;
+  salted.insert(salted.end(), salt.begin(), salt.end());
+  salted.insert(salted.end(), h2.begin(), h2.end());
+  SHA1(salted.data(), salted.size(), h3.data());
+}
+
+} // namespace
 
 bool verify_native_password(const std::string& password_plaintext,
                              const std::array<uint8_t, 20>& auth_data,
                              const std::vector<uint8_t>& auth_response) {
   if (auth_response.size() != 20) return false;
-  if (password_plaintext.empty() && auth_response.size() == 20) {
-    // Empty password: client sends zero bytes (or empty response)
+  if (password_plaintext.empty()) {
     bool all_zero = true;
     for (auto b : auth_response) if (b) { all_zero = false; break; }
     return all_zero;
   }
 
-  // SHA1(password)
-  std::array<uint8_t, 20> h1{};
-  SHA1(reinterpret_cast<const unsigned char*>(password_plaintext.data()),
-       password_plaintext.size(), h1.data());
-
-  // SHA1(SHA1(password))
-  std::array<uint8_t, 20> h2{};
-  SHA1(h1.data(), h1.size(), h2.data());
-
-  // SHA1(salt + SHA1(SHA1(password)))
-  std::vector<uint8_t> salted;
-  salted.insert(salted.end(), auth_data.begin(), auth_data.end());
-  salted.insert(salted.end(), h2.begin(), h2.end());
-  std::array<uint8_t, 20> h3{};
-  SHA1(salted.data(), salted.size(), h3.data());
+  std::array<uint8_t, 20> h1{}, h3{};
+  native_hashes(password_plaintext, auth_data, h1, h3);
 
   // expected SHA1(password) = auth_response XOR h3
   std::array<uint8_t, 20> expected{};
@@ -140,6 +213,22 @@ bool verify_native_password(const std::string& password_plaintext,
         auth_response[static_cast<std::size_t>(i)] ^ h3[static_cast<std::size_t>(i)];
 
   return expected == h1;
+}
+
+std::vector<uint8_t> scramble_native_password(
+    const std::string& password_plaintext,
+    const std::array<uint8_t, 20>& salt) {
+  if (password_plaintext.empty()) return {};
+
+  std::array<uint8_t, 20> h1{}, h3{};
+  native_hashes(password_plaintext, salt, h1, h3);
+
+  // token = SHA1(pwd) XOR SHA1(salt + SHA1(SHA1(pwd)))
+  std::vector<uint8_t> token(20);
+  for (int i = 0; i < 20; ++i)
+    token[static_cast<std::size_t>(i)] =
+        h1[static_cast<std::size_t>(i)] ^ h3[static_cast<std::size_t>(i)];
+  return token;
 }
 
 } // namespace dbmesh::protocol::mysql

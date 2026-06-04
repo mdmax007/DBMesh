@@ -27,6 +27,11 @@ struct HandshakeV10 {
 
   // Returns the encoded packet payload (without the 4-byte MySQL header).
   [[nodiscard]] std::vector<uint8_t> encode() const;
+
+  // Client side: parse a HandshakeV10 sent by a real backend server.
+  // Reassembles the 20-byte salt from auth-plugin-data parts 1 and 2.
+  [[nodiscard]] static Result<HandshakeV10, std::string>
+  decode(const std::vector<uint8_t>& payload);
 };
 
 // ── Client → Server handshake response (HandshakeResponse41) ─────────────
@@ -43,6 +48,9 @@ struct HandshakeResponse41 {
   // Parses the client packet payload.
   [[nodiscard]] static Result<HandshakeResponse41, std::string>
   decode(const std::vector<uint8_t>& payload);
+
+  // Client side: encode our response to send to a real backend server.
+  [[nodiscard]] std::vector<uint8_t> encode() const;
 };
 
 // ── Auth verification ─────────────────────────────────────────────────────
@@ -55,6 +63,13 @@ struct HandshakeResponse41 {
     const std::string& password_plaintext,
     const std::array<uint8_t, 20>& auth_data,
     const std::vector<uint8_t>& auth_response);
+
+// Client side: compute the 20-byte mysql_native_password token to send to a
+// backend, given the backend's salt. Returns empty vector for empty password.
+//   token = SHA1(pwd) XOR SHA1(salt + SHA1(SHA1(pwd)))
+[[nodiscard]] std::vector<uint8_t> scramble_native_password(
+    const std::string& password_plaintext,
+    const std::array<uint8_t, 20>& salt);
 
 } // namespace dbmesh::protocol::mysql
 

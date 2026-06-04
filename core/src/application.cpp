@@ -1,5 +1,9 @@
 #include "dbmesh/core/application.h"
+#include "dbmesh/pool/pool_manager.h"
 #include "dbmesh/protocol/mysql/mysql_frontend.h"
+
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
@@ -111,6 +115,20 @@ void Application::on_config_reload(std::shared_ptr<const Config> new_config) {
 }
 
 void Application::start_subsystems() {
+  // ── Connection pools (Milestone 1.3) ──────────────────────────────────
+  pool_manager_ = std::make_unique<pool::PoolManager>(
+      io_context_.get_executor(), config_);
+  for (const auto& backend : config_->backends)
+    pool_manager_->create_pool(backend);
+  logger_->info("created " + std::to_string(pool_manager_->pool_count()) +
+                " backend pool(s)");
+
+  // Warm pools in the background so startup is not blocked by unreachable
+  // backends (warm is best-effort and logs failures).
+  boost::asio::co_spawn(io_context_, pool_manager_->warm_all(),
+                        boost::asio::detached);
+
+  // ── MySQL frontend (Milestone 1.2) ────────────────────────────────────
   if (config_->listeners.mysql.enabled) {
     mysql_frontend_ = std::make_unique<protocol::mysql::MySqlFrontend>(
         io_context_, config_);
@@ -118,7 +136,6 @@ void Application::start_subsystems() {
     logger_->info("MySQL frontend listening on port " +
                   std::to_string(config_->listeners.mysql.port));
   }
-  // Milestone 1.3+: init pool manager
   // Milestone 1.7+: start health monitor
   // Milestone 1.12+: start HTTP API server
 }
@@ -127,6 +144,14 @@ void Application::stop_subsystems() {
   if (mysql_frontend_) {
     mysql_frontend_->stop();
     mysql_frontend_.reset();
+  }
+  if (pool_manager_) {
+    // Drain synchronously on the io_context before it stops.
+    boost::asio::co_spawn(io_context_, pool_manager_->shutdown(),
+                          boost::asio::detached);
+    io_context_.restart();
+    io_context_.run();
+    pool_manager_.reset();
   }
   logger_->info("all subsystems stopped");
 }
