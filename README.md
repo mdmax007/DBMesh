@@ -43,7 +43,7 @@ DBMesh is a high-performance, distributed database routing mesh written in C++20
 > connection pooling, failover, clustering, and the admin API/UI are upcoming.
 >
 > **Building from source** (dev toolchain — Clang 14 / Boost 1.74 on Ubuntu
-> 22.04; see [`CLAUDE.md`](CLAUDE.md) for the full constraint list):
+> 22.04; 
 >
 > ```bash
 > cmake -GNinja -DCMAKE_BUILD_TYPE=Debug \
