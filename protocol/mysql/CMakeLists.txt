@@ -3,12 +3,16 @@ add_library(dbmesh_protocol_mysql STATIC
   src/handshake.cpp
   src/mysql_connection.cpp
   src/mysql_frontend.cpp
+  src/mysql_backend_connection.cpp
+  src/backend_connector.cpp
 )
 target_include_directories(dbmesh_protocol_mysql PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_link_libraries(dbmesh_protocol_mysql PUBLIC
   dbmesh_core
+  dbmesh_pool
+  dbmesh_routing
   OpenSSL::SSL
   OpenSSL::Crypto
 )

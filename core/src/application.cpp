@@ -1,6 +1,11 @@
 #include "dbmesh/core/application.h"
 #include "dbmesh/pool/pool_manager.h"
+#include "dbmesh/protocol/mysql/backend_connector.h"
 #include "dbmesh/protocol/mysql/mysql_frontend.h"
+#include "dbmesh/routing/backend_registry.h"
+#include "dbmesh/routing/backend_selector.h"
+#include "dbmesh/routing/routing_engine.h"
+#include "dbmesh/routing/schema_registry.h"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -115,11 +120,27 @@ void Application::on_config_reload(std::shared_ptr<const Config> new_config) {
 }
 
 void Application::start_subsystems() {
+  // ── Registries + routing engine (Milestone 1.5) ───────────────────────
+  schema_registry_  = std::make_unique<routing::SchemaRegistry>();
+  backend_registry_ = std::make_unique<routing::BackendRegistry>();
+  schema_registry_->load(config_->schemas);
+  backend_registry_->load(config_->backends);
+  backend_selector_ = std::make_unique<routing::BackendSelector>(
+      *backend_registry_, config_->routing);
+  routing_engine_ = std::make_unique<routing::RoutingEngine>(
+      *schema_registry_, *backend_selector_, config_->routing);
+  logger_->info("routing engine ready (" +
+                std::to_string(schema_registry_->size()) + " schemas, " +
+                std::to_string(backend_registry_->size()) + " backends)");
+
   // ── Connection pools (Milestone 1.3) ──────────────────────────────────
   pool_manager_ = std::make_unique<pool::PoolManager>(
       io_context_.get_executor(), config_);
-  for (const auto& backend : config_->backends)
-    pool_manager_->create_pool(backend);
+  for (const auto& backend : config_->backends) {
+    auto factory = protocol::mysql::BackendConnector::make_factory(
+        io_context_.get_executor(), backend);
+    pool_manager_->create_pool_with_factory(backend, std::move(factory));
+  }
   logger_->info("created " + std::to_string(pool_manager_->pool_count()) +
                 " backend pool(s)");
 
@@ -131,7 +152,7 @@ void Application::start_subsystems() {
   // ── MySQL frontend (Milestone 1.2) ────────────────────────────────────
   if (config_->listeners.mysql.enabled) {
     mysql_frontend_ = std::make_unique<protocol::mysql::MySqlFrontend>(
-        io_context_, config_);
+        io_context_, config_, *routing_engine_, *pool_manager_);
     mysql_frontend_->start();
     logger_->info("MySQL frontend listening on port " +
                   std::to_string(config_->listeners.mysql.port));

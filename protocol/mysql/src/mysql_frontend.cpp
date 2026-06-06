@@ -37,9 +37,13 @@ static asio::awaitable<void> reject_connection(tcp::socket sock) {
 // ── MySqlFrontend ─────────────────────────────────────────────────────────
 
 MySqlFrontend::MySqlFrontend(asio::io_context& io_context,
-                              std::shared_ptr<const Config> config)
+                              std::shared_ptr<const Config> config,
+                              const routing::RoutingEngine& engine,
+                              pool::PoolManager& pool_manager)
     : io_context_(io_context),
       config_(std::move(config)),
+      engine_(&engine),
+      pool_manager_(&pool_manager),
       acceptor_(io_context_),
       logger_(Logger::get("mysql.frontend")) {}
 
@@ -94,7 +98,7 @@ asio::awaitable<void> MySqlFrontend::accept_loop() {
     // work around Clang 14's lambda-coroutine capture limitations.
     // run() holds shared_from_this() internally to keep itself alive.
     auto conn = std::make_shared<MySqlConnection>(
-        std::move(socket), id, config_);
+        std::move(socket), id, config_, *engine_, *pool_manager_);
 
     asio::co_spawn(io_context_, MySqlConnection::start(conn), asio::detached);
     // active_conns_ is decremented when the connection coroutine finishes.

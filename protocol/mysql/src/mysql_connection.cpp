@@ -1,8 +1,11 @@
 #include "dbmesh/protocol/mysql/mysql_connection.h"
 
+#include "dbmesh/pool/connection_pool.h"
 #include "dbmesh/protocol/mysql/constants.h"
 #include "dbmesh/protocol/mysql/handshake.h"
+#include "dbmesh/protocol/mysql/mysql_backend_connection.h"
 #include "dbmesh/protocol/mysql/packets.h"
+#include "dbmesh/routing/session_view.h"
 
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -18,10 +21,14 @@ namespace asio = boost::asio;
 
 MySqlConnection::MySqlConnection(asio::ip::tcp::socket socket,
                                   uint32_t connection_id,
-                                  std::shared_ptr<const Config> config)
+                                  std::shared_ptr<const Config> config,
+                                  const routing::RoutingEngine& engine,
+                                  pool::PoolManager& pool_manager)
     : socket_(std::move(socket)),
       connection_id_(connection_id),
       config_(std::move(config)),
+      engine_(&engine),
+      pool_manager_(&pool_manager),
       logger_(Logger::get("mysql.conn")) {}
 
 asio::awaitable<void> MySqlConnection::start(
@@ -187,13 +194,15 @@ asio::awaitable<void> MySqlConnection::handle_com_field_list(
 
 namespace {
 
-std::string normalise(const std::string& sql) {
+std::string normalise_prefix(const std::string& sql) {
+  // Uppercased, whitespace-collapsed first ~16 chars — enough to detect the
+  // leading keyword for session-local statements.
   std::string out;
-  out.reserve(sql.size());
   bool in_space = true;
   for (char c : sql) {
+    if (out.size() >= 16) break;
     if (std::isspace(static_cast<unsigned char>(c))) {
-      if (!in_space) out += ' ';
+      if (!in_space && !out.empty()) out += ' ';
       in_space = true;
     } else {
       out += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -207,49 +216,20 @@ bool starts_with(const std::string& s, const char* p) {
   return s.rfind(p, 0) == 0;
 }
 
-// Builds all packet payloads for a query stub response.
-// Returns empty vector for SET/USE (caller sends OK).
-// Returns {special="use:<db>"} for USE statements.
-// GCC 11.4 ICE workaround: all complex logic lives here, outside the coroutine.
-std::vector<std::vector<uint8_t>> build_stub_response(
-    const std::string& norm,
-    const std::string& current_db) {
-  using namespace dbmesh::protocol::mysql;
+bool is_eof_packet(const std::vector<uint8_t>& payload) {
+  return !payload.empty() && payload[0] == 0xFE && payload.size() < 9;
+}
 
-  // Classic text result set (no DEPRECATE_EOF):
-  //   column_count | column_def... | EOF | row... | EOF
-  if (norm == "SELECT 1" || norm == "SELECT 1 ;") {
-    return {make_column_count(1),
-            make_column_def("1", col_type::VAR_STRING, 1),
-            make_eof(),
-            make_text_row({"1"}),
-            make_eof()};
+uint16_t routing_error_to_mysql(routing::RoutingError e) {
+  switch (e) {
+    case routing::RoutingError::NO_BACKEND_AVAILABLE:
+    case routing::RoutingError::POOL_QUEUE_FULL:
+      return err::CON_COUNT_ERROR;  // 1040
+    case routing::RoutingError::FIREWALL_BLOCKED:
+      return err::NOT_ALLOWED_COMMAND;  // 1148
+    default:
+      return 1105;  // ER_UNKNOWN_ERROR
   }
-  if (starts_with(norm, "SELECT DATABASE()")) {
-    return {make_column_count(1),
-            make_column_def("DATABASE()", col_type::VAR_STRING, 64),
-            make_eof(),
-            make_text_row({current_db}),
-            make_eof()};
-  }
-  if (starts_with(norm, "SELECT VERSION()") ||
-      starts_with(norm, "SELECT @@VERSION") ||
-      starts_with(norm, "SELECT @@version")) {
-    return {make_column_count(1),
-            make_column_def("VERSION()", col_type::VAR_STRING, 64),
-            make_eof(),
-            make_text_row({"8.0.30-dbmesh"}),
-            make_eof()};
-  }
-  if (starts_with(norm, "SELECT @@") ||
-      starts_with(norm, "SHOW ") ||
-      starts_with(norm, "SELECT SLEEP(")) {
-    return {make_column_count(1),
-            make_column_def("Value", col_type::VAR_STRING, 255),
-            make_eof(),
-            make_eof()};  // no rows
-  }
-  return {};  // caller decides (SET/USE/error)
 }
 
 } // namespace
@@ -257,36 +237,145 @@ std::vector<std::vector<uint8_t>> build_stub_response(
 asio::awaitable<void> MySqlConnection::handle_com_query(
     const std::vector<uint8_t>& payload) {
   std::string sql(payload.begin() + 1, payload.end());
-  std::string norm = normalise(sql);
+  std::string prefix = normalise_prefix(sql);
 
   logger_->debug("conn " + std::to_string(connection_id_) +
                  " query: " + sql.substr(0, 60));
 
-  if (starts_with(norm, "SET ")) {
+  // Session-local statements: tracked here and answered locally (true backend
+  // replay of session state lands with the trackers in Milestone 1.6).
+  if (starts_with(prefix, "SET ")) {
+    if (prefix.find("AUTOCOMMIT") != std::string::npos)
+      autocommit_ = prefix.find("AUTOCOMMIT=0") == std::string::npos &&
+                    prefix.find("AUTOCOMMIT = 0") == std::string::npos;
     co_await send_ok();
     co_return;
   }
-
-  if (starts_with(norm, "USE ")) {
-    std::string db = sql.substr(4);
-    while (!db.empty() &&
-           std::isspace(static_cast<unsigned char>(db.back())))
+  if (starts_with(prefix, "USE ")) {
+    std::string db = sql.substr(sql.find_first_not_of(" \t", 3));
+    while (!db.empty() && std::isspace(static_cast<unsigned char>(db.back())))
       db.pop_back();
     current_db_ = db;
     co_await send_ok();
     co_return;
   }
-
-  auto packets = build_stub_response(norm, current_db_);
-  if (!packets.empty()) {
-    for (auto& pkt : packets) co_await send(pkt);
+  if (starts_with(prefix, "BEGIN") || starts_with(prefix, "START TRANS")) {
+    in_transaction_ = true;  // M1.6 adds real backend pinning for transactions
+    co_await send_ok();
+    co_return;
+  }
+  if (starts_with(prefix, "COMMIT") || starts_with(prefix, "ROLLBACK")) {
+    in_transaction_ = false;
+    co_await send_ok();
     co_return;
   }
 
-  // M1.5+: route to RoutingEngine. Stub error for now.
-  std::string msg = "DBMesh: routing not yet implemented (M1.5). SQL: " +
-                    sql.substr(0, 80);
-  co_await send_err(1105, "HY000", msg);
+  co_await route_and_forward(payload, sql);
+}
+
+asio::awaitable<void> MySqlConnection::route_and_forward(
+    const std::vector<uint8_t>& query_packet, const std::string& sql) {
+  // ── Plan the route (synchronous pipeline) ─────────────────────────────
+  routing::SessionView session;
+  session.current_schema = current_db_;
+  session.in_transaction = in_transaction_;
+  session.autocommit     = autocommit_;
+
+  auto planned = engine_->plan(sql, session);
+  if (is_err(planned)) {
+    auto e = get_error(planned);
+    co_await send_err(routing_error_to_mysql(e), "HY000",
+                      std::string("DBMesh routing: ") +
+                          routing::routing_error_str(e));
+    co_return;
+  }
+  const auto& plan = get_value(planned);
+
+  // ── Acquire a backend connection ──────────────────────────────────────
+  auto* pool = pool_manager_->get_pool(plan.backend_id);
+  if (pool == nullptr) {
+    co_await send_err(1105, "HY000",
+                      "DBMesh: no pool for backend '" + plan.backend_id + "'");
+    co_return;
+  }
+  auto acquired = co_await pool->acquire();
+  if (is_err(acquired)) {
+    co_await send_err(err::CON_COUNT_ERROR, "08004",
+                      "DBMesh: backend pool unavailable for '" +
+                          plan.backend_id + "'");
+    co_return;
+  }
+  pool::PooledConnection* pooled = get_value(acquired);
+  auto& backend = static_cast<MySqlBackendConnection&>(pooled->backend());
+
+  logger_->debug("conn " + std::to_string(connection_id_) + " -> backend '" +
+                 plan.backend_id + "' (" +
+                 (plan.role == BackendRole::PRIMARY ? "primary" : "replica") +
+                 ")");
+
+  // ── Forward the raw COM_QUERY and stream the result back ──────────────
+  bool ok = true;
+  boost::system::error_code fwd_ec;
+  try {
+    uint8_t bseq = 0;
+    auto w = co_await backend.framer().write_packet(backend.socket(),
+                                                    query_packet, bseq);
+    if (is_err(w)) {
+      ok = false;
+    } else {
+      ok = co_await proxy_result(backend.framer(), backend.socket());
+    }
+  } catch (const boost::system::system_error& e) {
+    fwd_ec = e.code();
+    ok = false;
+  }
+
+  pool->release(pooled, /*healthy=*/ok);
+  pooled->queries_served++;
+
+  if (!ok) {
+    // Backend died mid-query. Query retry (M1.8) will handle SELECTs later.
+    co_await send_err(err::CON_COUNT_ERROR, "08S01",
+                      "DBMesh: backend '" + plan.backend_id +
+                          "' disconnected during query");
+  }
+}
+
+asio::awaitable<bool> MySqlConnection::proxy_result(
+    PacketFramer& backend_framer, asio::ip::tcp::socket& backend) {
+  // First response packet decides the shape.
+  auto first = co_await backend_framer.read_packet(backend);
+  if (is_err(first)) co_return false;
+  {
+    const auto& pkt = get_value(first);
+    seq_ = pkt.sequence;
+    co_await send(pkt.payload);
+    uint8_t b0 = pkt.payload.empty() ? 0 : pkt.payload[0];
+    if (b0 == OK_PACKET || b0 == ERR_PACKET || b0 == 0xFB) {
+      // OK / ERR / LOCAL INFILE (unsupported) — single-packet response.
+      co_return true;
+    }
+  }
+
+  // Result set: forward column definitions until the first EOF.
+  for (;;) {
+    auto r = co_await backend_framer.read_packet(backend);
+    if (is_err(r)) co_return false;
+    const auto& pkt = get_value(r);
+    seq_ = pkt.sequence;
+    co_await send(pkt.payload);
+    if (is_eof_packet(pkt.payload)) break;
+  }
+  // Forward rows until the terminating EOF.
+  for (;;) {
+    auto r = co_await backend_framer.read_packet(backend);
+    if (is_err(r)) co_return false;
+    const auto& pkt = get_value(r);
+    seq_ = pkt.sequence;
+    co_await send(pkt.payload);
+    if (is_eof_packet(pkt.payload)) break;
+  }
+  co_return true;
 }
 
 // ── Wire helpers ──────────────────────────────────────────────────────────

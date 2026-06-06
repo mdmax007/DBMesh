@@ -24,11 +24,10 @@ class PoolManager {
   PoolManager(boost::asio::any_io_executor ex,
               std::shared_ptr<const Config> config);
 
-  // Creates a pool for `backend` using the real MySQL BackendConnector and
-  // starts its idle reaper. No-op if a pool with that id already exists.
-  void create_pool(const BackendConfig& backend);
-
-  // Same, but with an injected connection factory (used by tests).
+  // Creates a pool for `backend` with the given connection factory and starts
+  // its idle reaper. No-op if a pool with that id already exists. The factory
+  // is protocol-specific (e.g. protocol::mysql::BackendConnector::make_factory)
+  // and supplied by the caller — the pool module stays protocol-agnostic.
   void create_pool_with_factory(const BackendConfig& backend,
                                 ConnectionPool::Factory factory);
 

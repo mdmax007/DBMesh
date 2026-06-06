@@ -15,6 +15,12 @@
 
 namespace dbmesh::protocol::mysql { class MySqlFrontend; }
 namespace dbmesh::pool { class PoolManager; }
+namespace dbmesh::routing {
+class SchemaRegistry;
+class BackendRegistry;
+class BackendSelector;
+class RoutingEngine;
+}
 
 namespace dbmesh {
 
@@ -53,6 +59,10 @@ class Application {
   std::atomic<bool>                 shutting_down_{false};
   std::string                       pid_file_path_;
 
+  std::unique_ptr<routing::SchemaRegistry>        schema_registry_;
+  std::unique_ptr<routing::BackendRegistry>       backend_registry_;
+  std::unique_ptr<routing::BackendSelector>       backend_selector_;
+  std::unique_ptr<routing::RoutingEngine>         routing_engine_;
   std::unique_ptr<pool::PoolManager>              pool_manager_;
   std::unique_ptr<protocol::mysql::MySqlFrontend> mysql_frontend_;
 };

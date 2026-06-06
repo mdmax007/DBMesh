@@ -1,7 +1,5 @@
 #include "dbmesh/pool/pool_manager.h"
 
-#include "dbmesh/pool/backend_connector.h"
-
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -29,11 +27,6 @@ void PoolManager::create_pool_with_factory(const BackendConfig& backend,
   pools_.emplace(backend.id, std::move(pool));
   logger_->info("created pool for backend '" + backend.id + "' (" +
                 backend.host + ":" + std::to_string(backend.port) + ")");
-}
-
-void PoolManager::create_pool(const BackendConfig& backend) {
-  create_pool_with_factory(backend,
-                           BackendConnector::make_factory(ex_, backend));
 }
 
 ConnectionPool* PoolManager::get_pool(const BackendID& id) {

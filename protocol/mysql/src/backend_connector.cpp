@@ -1,9 +1,9 @@
-#include "dbmesh/pool/backend_connector.h"
+#include "dbmesh/protocol/mysql/backend_connector.h"
 
 #include "dbmesh/core/logger.h"
-#include "dbmesh/pool/mysql_backend_connection.h"
 #include "dbmesh/protocol/mysql/constants.h"
 #include "dbmesh/protocol/mysql/handshake.h"
+#include "dbmesh/protocol/mysql/mysql_backend_connection.h"
 #include "dbmesh/protocol/mysql/packet_framer.h"
 
 #include <boost/asio/connect.hpp>
@@ -14,19 +14,20 @@
 #include <array>
 #include <string>
 
-namespace dbmesh::pool {
+namespace dbmesh::protocol::mysql {
 
 namespace asio = boost::asio;
-namespace mysql = protocol::mysql;
 using tcp = asio::ip::tcp;
+using pool::BackendConnection;
+using pool::ConnectionPool;
+using pool::PoolError;
 
 namespace {
 
 // Capabilities DBMesh advertises when connecting to a backend as a client.
 constexpr uint32_t kClientFlags =
-    mysql::caps::LONG_PASSWORD | mysql::caps::PROTOCOL_41 |
-    mysql::caps::SECURE_CONNECTION | mysql::caps::PLUGIN_AUTH |
-    mysql::caps::TRANSACTIONS | mysql::caps::CONNECT_WITH_DB;
+    caps::LONG_PASSWORD | caps::PROTOCOL_41 | caps::SECURE_CONNECTION |
+    caps::PLUGIN_AUTH | caps::TRANSACTIONS | caps::CONNECT_WITH_DB;
 
 // Reads the salt out of an AuthSwitchRequest payload (0xFE + plugin\0 + salt).
 std::array<uint8_t, 20> parse_switch_salt(const std::vector<uint8_t>& payload) {
@@ -43,7 +44,7 @@ std::array<uint8_t, 20> parse_switch_salt(const std::vector<uint8_t>& payload) {
 
 asio::awaitable<Result<std::unique_ptr<BackendConnection>, PoolError>>
 BackendConnector::connect(asio::any_io_executor ex, BackendConfig backend) {
-  auto logger = Logger::get("pool.connector");
+  auto logger = Logger::get("mysql.connector");
   boost::system::error_code ec;
 
   // ── 1. Resolve + TCP connect ──────────────────────────────────────────
@@ -65,13 +66,13 @@ BackendConnector::connect(asio::any_io_executor ex, BackendConfig backend) {
   }
   socket.set_option(tcp::no_delay(true), ec);
 
-  mysql::PacketFramer framer;
+  PacketFramer framer;
 
   // ── 2. Read server HandshakeV10 ───────────────────────────────────────
   auto hs_pkt = co_await framer.read_packet(socket);
   if (is_err(hs_pkt)) co_return Err(PoolError::CONNECT_FAILED);
 
-  auto hs = mysql::HandshakeV10::decode(get_value(hs_pkt).payload);
+  auto hs = HandshakeV10::decode(get_value(hs_pkt).payload);
   if (is_err(hs)) {
     logger->warn("bad handshake from '" + backend.id + "': " + get_error(hs));
     co_return Err(PoolError::CONNECT_FAILED);
@@ -80,16 +81,16 @@ BackendConnector::connect(asio::any_io_executor ex, BackendConfig backend) {
   uint32_t backend_thread_id = server_hs.connection_id;
 
   // ── 3. Send HandshakeResponse41 (mysql_native_password) ───────────────
-  mysql::HandshakeResponse41 resp;
+  HandshakeResponse41 resp;
   resp.capability_flags = kClientFlags;
-  resp.max_packet_size  = mysql::MAX_PACKET_SIZE;
-  resp.character_set    = mysql::charset::UTF8MB4;
+  resp.max_packet_size  = MAX_PACKET_SIZE;
+  resp.character_set    = charset::UTF8MB4;
   resp.username         = backend.user;
-  resp.auth_response    = mysql::scramble_native_password(backend.password,
-                                                          server_hs.auth_data);
+  resp.auth_response    = scramble_native_password(backend.password,
+                                                   server_hs.auth_data);
   resp.database         = "";  // no initial DB; routing sets it per query (M1.5)
-  resp.auth_plugin      = mysql::NATIVE_PASSWORD;
-  resp.capability_flags &= ~mysql::caps::CONNECT_WITH_DB;
+  resp.auth_plugin      = NATIVE_PASSWORD;
+  resp.capability_flags &= ~caps::CONNECT_WITH_DB;
 
   uint8_t seq = static_cast<uint8_t>(get_value(hs_pkt).sequence + 1);
   auto w = co_await framer.write_packet(socket, resp.encode(), seq);
@@ -103,7 +104,7 @@ BackendConnector::connect(asio::any_io_executor ex, BackendConfig backend) {
   if (!ap.payload.empty() && ap.payload[0] == 0xFE) {
     // AuthSwitchRequest — recompute native_password with the new salt.
     auto new_salt = parse_switch_salt(ap.payload);
-    auto token    = mysql::scramble_native_password(backend.password, new_salt);
+    auto token    = scramble_native_password(backend.password, new_salt);
     uint8_t s2    = static_cast<uint8_t>(ap.sequence + 1);
     auto w2 = co_await framer.write_packet(socket, token, s2);
     if (is_err(w2)) co_return Err(PoolError::CONNECT_FAILED);
@@ -111,13 +112,13 @@ BackendConnector::connect(asio::any_io_executor ex, BackendConfig backend) {
     auto final_pkt = co_await framer.read_packet(socket);
     if (is_err(final_pkt)) co_return Err(PoolError::CONNECT_FAILED);
     const auto& fp = get_value(final_pkt);
-    if (fp.payload.empty() || fp.payload[0] != mysql::OK_PACKET) {
+    if (fp.payload.empty() || fp.payload[0] != OK_PACKET) {
       logger->warn("auth (switch) rejected by '" + backend.id + "'");
       co_return Err(PoolError::CONNECT_FAILED);
     }
-  } else if (ap.payload.empty() || ap.payload[0] != mysql::OK_PACKET) {
+  } else if (ap.payload.empty() || ap.payload[0] != OK_PACKET) {
     logger->warn("auth rejected by '" + backend.id +
-                 "' (caching_sha2 full auth not supported in M1.3 — use "
+                 "' (caching_sha2 full auth not supported — use "
                  "mysql_native_password)");
     co_return Err(PoolError::CONNECT_FAILED);
   }
@@ -140,4 +141,4 @@ ConnectionPool::Factory BackendConnector::make_factory(asio::any_io_executor ex,
   };
 }
 
-} // namespace dbmesh::pool
+} // namespace dbmesh::protocol::mysql
